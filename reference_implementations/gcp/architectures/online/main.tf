@@ -46,12 +46,191 @@ locals {
 
 ### BEGIN ENABLING APIS
 
-resource "google_project_service" "cloudresourcemanager" {
-  project = var.project
-  service = "cloudresourcemanager.googleapis.com"
+module  "project_services" {
+  source="terraform-google-modules/project-factory/google//modules/project_services"
+  project_id  = var.project
+  activate_apis  = [
+    "aiplatform.googleapis.com",
+    "artifactregistry.googleapis.com",
+    "bigquery.googleapis.com",
+    "cloudbuild.googleapis.com",
+    "cloudfunctions.googleapis.com",
+    "cloudresourcemanager.googleapis.com",
+    "compute.googleapis.com",
+    "config.googleapis.com",
+    "documentai.googleapis.com",
+    "eventarc.googleapis.com",
+    "iam.googleapis.com",
+    "run.googleapis.com",
+    "serviceusage.googleapis.com",
+    "storage-api.googleapis.com",
+    "storage.googleapis.com",
+  ]
+}
+### END ENABLING APIS
+
+### Creating local variables
+locals {
+  bucket_main_name   = "summary-main-${var.project}"
+  bucket_docs_name   = "summary-docs-${var.project}"
+  webhook_name       = "summary-webhook"
+  webhook_sa_name    = "summary-webhook-sa"
+  artifact_repo_name = "summary-artifact-repo"
+  trigger_name       = "summary-trigge"
+  trigger_sa_name    = "summary-trigger-sa"
+  ocr_processor_name = "summary-ocr-processor"
+  bq_dataset_name    = "summary_dataset"
 }
 
-### END ENABLING APIS
+resource "google_storage_bucket" "main" {
+  name= local.bucket_main_name
+  location= var.region
+  uniform_bucket_level_access = true
+}
+
+resource "google_storage_bucket" "docs" {
+  name= local.bucket_docs_name
+  location= var.region
+  uniform_bucket_level_access = true
+}
+
+resource "google_cloudfunctions2_function" "webhook" {
+  project  = var.project
+  name     = local.webhook_name
+  location = var.region
+
+  build_config {
+    runtime           = "python312"
+    entry_point       = "on_cloud_event"
+    docker_repository = google_artifact_registry_repository.webhook_images.id
+    source {
+      storage_source {
+        bucket = google_storage_bucket.main.name
+        object = google_storage_bucket_object.webhook_staging.name
+      }
+    }
+  }
+  service_config {
+    available_memory      = "1G"
+    service_account_email = google_service_account.sa.email
+    environment_variables = {
+      OUTPUT_BUCKET    = google_storage_bucket.main.name
+      DOCAI_PROCESSOR  = google_document_ai_processor.ocr.id
+      DOCAI_LOCATION   = google_document_ai_processor.ocr.location
+      BQ_DATASET       = google_bigquery_dataset.main.dataset_id
+      BQ_TABLE         = google_bigquery_table.main.table_id
+      LOG_EXECUTION_ID = true
+    }
+  }
+}
+
+resource "google_project_iam_member" "webhook" {
+  project = var.project
+  member  = "serviceAccount:${google_service_account.sa.email}"
+  for_each = toset([
+    "roles/aiplatform.serviceAgent", # https://cloud.google.com/iam/docs/service-agents
+    "roles/bigquery.dataEditor",     # https://cloud.google.com/bigquery/docs/access-control
+    "roles/documentai.apiUser",      # https://cloud.google.com/document-ai/docs/access-control/iam-roles
+  ])
+  role = each.key
+}
+resource "google_artifact_registry_repository" "webhook_images" {
+  location      = var.region
+  repository_id = local.artifact_repo_name
+  format        = "DOCKER"
+}
+
+data "archive_file" "webhook_staging" {
+  type        = "zip"
+  source_dir  = "webhook/"
+  output_path = abspath("${path.module}/.tmp/webhook.zip")
+  excludes = [
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+    "env",
+  ]
+}
+
+resource "google_storage_bucket_object" "webhook_staging" {
+  name   = "webhook-staging/${data.archive_file.webhook_staging.output_base64sha256}.zip"
+  bucket = google_storage_bucket.main.name
+  source = data.archive_file.webhook_staging.output_path
+}
+
+#-- Eventarc trigger --#
+resource "google_eventarc_trigger" "trigger" {
+  location        = var.region
+  name            = local.trigger_name
+  service_account = google_service_account.sa.email
+
+  matching_criteria {
+    attribute = "type"
+    value     = "google.cloud.storage.object.v1.finalized"
+  }
+  matching_criteria {
+    attribute = "bucket"
+    value     = google_storage_bucket.docs.name
+  }
+
+  destination {
+    cloud_run_service {
+      service = google_cloudfunctions2_function.webhook.name
+      region  = var.region
+    }
+  }
+}
+
+resource "google_project_iam_member" "trigger" {
+  project = var.project
+  member  = "serviceAccount:${google_service_account.sa.email}"
+  for_each = toset([
+    "roles/eventarc.eventReceiver", # https://cloud.google.com/eventarc/docs/access-control
+    "roles/run.invoker",            # https://cloud.google.com/run/docs/reference/iam/roles
+  ])
+  role = each.key
+}
+
+resource "google_project_iam_member" "gcs_account"{
+  project=var.project
+  member="serviceAccount:${google_service_account.sa.email}"
+  role="roles/pubsub.publisher"
+  }
+
+resource "google_project_iam_member" "eventarc_agent"{
+  project=var.project
+  member="serviceAccount:${google_service_account.sa.email}"
+  role="roles/eventarc.serviceAgent"
+}
+
+resource "google_project_service_identity" "eventarc_agent"{
+  provider=google-beta
+  project=var.project
+  service="eventarc.googleapis.com"
+}
+
+#--DocumentAI--#
+resource "google_document_ai_processor" "ocr"{
+  project=var.project
+  location="us"
+  display_name=local.ocr_processor_name
+  type="OCR_PROCESSOR"
+  }
+#--BigQuery--#
+resource "google_bigquery_dataset" "main"{
+  project=var.project
+  dataset_id=local.bq_dataset_name
+  delete_contents_on_destroy=true
+  }
+
+resource "google_bigquery_table" "main"{
+  project=var.project
+  dataset_id=google_bigquery_dataset.main.dataset_id
+  table_id="summaries"
+  schema=file("${path.module}/schema.json")
+  deletion_protection=false
+  }
 
 provider "google" {
   project = var.project
@@ -146,8 +325,8 @@ resource "google_compute_address" "static_ip" {
 }
 
 resource "google_storage_bucket" "api_source" {
-  name                        = "${var.project}-${var.env}-api-source"
-  location                    = "US"
+  name= "${var.project}-${var.env}-api-source"
+  location= "US"
   uniform_bucket_level_access = true
 }
 
@@ -165,10 +344,10 @@ resource "google_storage_bucket_object" "ml_api" {
 }
 
 resource "google_compute_instance" "ml-api-server" {
-  name                      = "${var.project}-${var.env}-ml-api"
+  name  = "${var.project}-${var.env}-ml-api"
   machine_type              = "e2-micro"
-  zone                      = "${var.region}-a"
-  tags                      = ["sshfw", "webserverfw", "http-server"]
+  zone  = "${var.region}-a"
+  tags  = ["sshfw", "webserverfw", "http-server"]
   allow_stopping_for_update = true
 
    
@@ -239,7 +418,7 @@ resource "google_vertex_ai_feature_online_store_featureview" "featureview" {
     cron = "* * * * *" // sync every minute
   }
   big_query_source {
-    uri               = "bq://${google_bigquery_table.featurestore_table.project}.${google_bigquery_table.featurestore_table.dataset_id}.${google_bigquery_table.featurestore_table.table_id}"
+    uri = "bq://${google_bigquery_table.featurestore_table.project}.${google_bigquery_table.featurestore_table.dataset_id}.${google_bigquery_table.featurestore_table.table_id}"
     entity_id_columns = ["entity_id"]
   }
 }

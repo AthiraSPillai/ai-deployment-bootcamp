@@ -1,5 +1,5 @@
 project = "bmo-team-2"
-short_project_prefix = "bmo-prj-t2"
+short_project_prefix = "bmo-t2"
 user = "shahkartikn11@gmail.com"
 env = "dev"
 region = "us-central1"
