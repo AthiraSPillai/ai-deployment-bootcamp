@@ -18,4 +18,5 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 sudo ufw allow 8080/tcp
+streamlit run main.py  >> ml-api.log 2>&1 &
 fastapi run main.py --port 8080 >> ml-api.log 2>&1 &
