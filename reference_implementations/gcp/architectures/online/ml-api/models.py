@@ -16,7 +16,7 @@ class LlamaTask(Enum):
         if task == LlamaTask.GENERATION:
             return input_dict
         elif task == LlamaTask.SUMMARIZATION:
-            prompt_template = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>You are a large language model used for summarization.<|eot_id|><|start_header_id|>user<|end_header_id|>Summarize the following text in under 100 words: {0}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+            prompt_template = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>You are a large language model used for summarization.<|eot_id|><|start_header_id|>user<|end_header_id|>Summarize the following text: {0}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
             input_dict["prompt"] = prompt_template.format(input_dict["prompt"])
             input_dict["max_tokens"] = 200
             return input_dict
