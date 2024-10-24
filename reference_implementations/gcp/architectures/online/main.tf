@@ -126,7 +126,7 @@ resource "google_cloudfunctions2_function" "webhook" {
 
 resource "google_project_iam_member" "webhook" {
   project = var.project
-  member  = "serviceAccount:${google_service_account.sa.email}"
+  member  = google_service_account.sa.member
   for_each = toset([
     "roles/aiplatform.serviceAgent", # https://cloud.google.com/iam/docs/service-agents
     "roles/bigquery.dataEditor",     # https://cloud.google.com/bigquery/docs/access-control
@@ -159,32 +159,9 @@ resource "google_storage_bucket_object" "webhook_staging" {
   source = data.archive_file.webhook_staging.output_path
 }
 
-#-- Eventarc trigger --#
-resource "google_eventarc_trigger" "trigger" {
-  location        = var.region
-  name            = local.trigger_name
-  service_account = google_service_account.sa.email
-
-  matching_criteria {
-    attribute = "type"
-    value     = "google.cloud.storage.object.v1.finalized"
-  }
-  matching_criteria {
-    attribute = "bucket"
-    value     = google_storage_bucket.docs.name
-  }
-
-  destination {
-    cloud_run_service {
-      service = google_cloudfunctions2_function.webhook.name
-      region  = var.region
-    }
-  }
-}
-
 resource "google_project_iam_member" "trigger" {
   project = var.project
-  member  = "serviceAccount:${google_service_account.sa.email}"
+  member  = google_service_account.sa.member
   for_each = toset([
     "roles/eventarc.eventReceiver", # https://cloud.google.com/eventarc/docs/access-control
     "roles/run.invoker",            # https://cloud.google.com/run/docs/reference/iam/roles
@@ -194,13 +171,13 @@ resource "google_project_iam_member" "trigger" {
 
 resource "google_project_iam_member" "gcs_account"{
   project=var.project
-  member="serviceAccount:${google_service_account.sa.email}"
+  member=google_service_account.sa.member
   role="roles/pubsub.publisher"
   }
 
 resource "google_project_iam_member" "eventarc_agent"{
   project=var.project
-  member="serviceAccount:${google_service_account.sa.email}"
+  member=google_service_account.sa.member
   role="roles/eventarc.serviceAgent"
 }
 
@@ -251,19 +228,19 @@ resource "google_service_account" "sa" {
 resource "google_project_iam_member" "storage_object_viewer" {
   project = var.project
   role    = "roles/storage.objectViewer"
-  member  = "serviceAccount:${google_service_account.sa.email}"
+  member  = google_service_account.sa.member
 }
 
 resource "google_project_iam_member" "ai_platform_user" {
   project = var.project
   role    = "roles/aiplatform.user"
-  member  = "serviceAccount:${google_service_account.sa.email}"
+  member  = google_service_account.sa.member
 }
 
 resource "google_project_iam_member" "compute_instances_get" {
   project = var.project
   role    = "roles/compute.instanceAdmin.v1"
-  member  = "serviceAccount:${google_service_account.sa.email}"
+  member  = google_service_account.sa.member
 }
 
 ### END SERVICE ACCOUNT PERMISSIONS
@@ -313,7 +290,7 @@ resource "google_compute_firewall" "webserver" {
 
   allow {
     protocol = "tcp"
-    ports    = ["8080"]
+    ports    = ["8080","8051"]
   }
 
   source_ranges = ["0.0.0.0/0"] 
